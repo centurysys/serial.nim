@@ -17,6 +17,17 @@ var
   TIOCMGET {.importc, header: "<termios.h>".}: cint
   TIOCMBIC {.importc, header: "<termios.h>".}: cint
   TIOCMBIS {.importc, header: "<termios.h>".}: cint
+  TIOCINQ {.importc, header: "<termios.h>".}: cint
+  TIOCOUTQ {.importc, header: "<termios.h>".}: cint
+  TIOCGRS485 {.importc, header: "<sys/ioctl.h>".}: cint
+  TIOCSRS485 {.importc, header: "<sys/ioctl.h>".}: cint
+
+const
+  SER_RS485_ENABLED: cuint = (1 shl 0)
+  SER_RS485_RTS_ON_SEND: cuint = (1 shl 1)
+  SER_RS485_RTS_AFTER_SEND: cuint = (1 shl 2)
+  SER_RS485_RX_DURING_TX: cuint = (1 shl 4)
+  SER_RS485_TERMINATE_BUS: cuint = (1 shl 5)
 
 type
   SerialPortBase[HandleType] = ref object of RootObj
@@ -31,6 +42,21 @@ type
 
   AsyncSerialPort* = ref object of SerialPortBase[AsyncFD]
     ## A serial port type used to read from and write to serial ports asynchronously.
+
+  Serial485ioc {.importc: "struct serial_rs485", header: "<linux/serial.h>".} = object
+    flags: cuint
+    delay_rts_before_send: cuint
+    delay_rts_after_send: cuint
+  Rs485Flag* {.pure.} = enum
+    Enabled = SER_RS485_ENABLED
+    RtsOnSend = SER_RS485_RTS_ON_SEND
+    RtsAfterSend = SER_RS485_RTS_AFTER_SEND
+    RxDuringTx = SER_RS485_RX_DURING_TX
+    TerminateBus = SER_RS485_TERMINATE_BUS
+  Serial485* = object
+    flags*: seq[Rs485Flag]
+    delay_rts_before_send*: uint
+    delay_rts_after_send*: uint
 
 proc ioctl(handle: cint, command: cint, arg: ptr cint): cint {.importc,
     header: "<sys/ioctl.h>".}
@@ -574,6 +600,77 @@ proc handshake*(port: SerialPort): Handshake =
 
   result = port.handshake
 
+proc inQueueLen*(port: SerialPort | AsyncSerialPort): int =
+  ## Get input queue length.
+  if not port.isOpen():
+    raise newException(InvalidSerialPortStateError,
+        "Cannot get the queue length whilst the serial port is closed")
+
+  var length: cint
+  if ioctl(cint(port.handle), TIOCINQ, addr length) == -1:
+    raiseOSError(osLastError())
+
+  result = length
+
+proc outQueueLen*(port: SerialPort | AsyncSerialPort): int =
+  ## Get output queue length.
+  if not port.isOpen():
+    raise newException(InvalidSerialPortStateError,
+        "Cannot get the queue length whilst the serial port is closed")
+
+  var length: cint
+  if ioctl(cint(port.handle), TIOCOUTQ, addr length) == -1:
+    raiseOSError(osLastError())
+
+  result = length
+
+proc getSerial485ioc(port: SerialPort | AsyncSerialPort): Serial485ioc =
+  if not port.isOpen():
+    raise newException(InvalidSerialPortStateError, "Cannot change the ready to send signal status whilst the serial port is closed")
+  if ioctl(cint(port.handle), TIOCGRS485, cast[ptr cint](addr result)) == -1:
+    raiseOSError(osLastError())
+
+proc getSerial485*(port: SerialPort | AsyncSerialPort): Serial485 =
+  let rs485ioc = port.getSerial485ioc()
+  let flags = rs485ioc.flags
+  if (flags and SER_RS485_ENABLED) != 0:
+    result.flags.add(Rs485Flag.Enabled)
+  if (flags and SER_RS485_RTS_ON_SEND) != 0:
+    result.flags.add(Rs485Flag.RtsOnSend)
+  if (flags and SER_RS485_RTS_AFTER_SEND) != 0:
+    result.flags.add(Rs485Flag.RtsAfterSend)
+  if (flags and SER_RS485_RX_DURING_TX) != 0:
+    result.flags.add(Rs485Flag.RxDuringTx)
+  if (flags and SER_RS485_TERMINATE_BUS) != 0:
+    result.flags.add(Rs485Flag.TerminateBus)
+  result.delay_rts_before_send = rs485ioc.delay_rts_before_send.uint
+  result.delay_rts_after_send = rs485ioc.delay_rts_after_send.uint
+
+proc rs485Enabled*(port: SerialPort | AsyncSerialPort): bool =
+  let serial485 = port.getSerial485ioc()
+  result = ((serial485.flags and SER_RS485_ENABLED) != 0).bool
+
+proc `rs485Enable=`*(port: SerialPort | AsyncSerialPort, rs485Enabled: bool) =
+  var serial485 = port.getSerial485ioc()
+  serial485.flags = serial485.flags and (not SER_RS485_ENABLED.cuint)
+  if rs485Enabled:
+    serial485.flags = serial485.flags or SER_RS485_ENABLED.cuint
+  if ioctl(cint(port.handle), TIOCSRS485, cast[ptr cint](addr serial485)) == -1:
+    raiseOSError(osLastError())
+
+proc rxDuringTx*(port: SerialPort | AsyncSerialPort): bool =
+  let serial485 = port.getSerial485ioc()
+  let flags = serial485.flags
+  result = ((flags and SER_RS485_RX_DURING_TX) != 0).bool
+
+proc `rxDuringTx=`*(port: SerialPort | AsyncSerialPort, rx_during_tx: bool) =
+  var serial485 = port.getSerial485ioc()
+  serial485.flags = serial485.flags and (not SER_RS485_RX_DURING_TX.cuint)
+  if rx_during_tx:
+    serial485.flags = serial485.flags or SER_RS485_RX_DURING_TX.cuint
+  if ioctl(cint(port.handle), TIOCSRS485, cast[ptr cint](addr serial485)) == -1:
+    raiseOSError(osLastError())
+
 proc initPort(port: SerialPort | AsyncSerialPort, tempHandle: cint, baudRate: int32, parity: Parity, dataBits: byte, stopBits: StopBits,
               handshaking: Handshake = Handshake.None,
                   readTimeout = TIMEOUT_INFINITE,
@@ -637,7 +734,7 @@ proc open*(port: SerialPort, baudRate: int32, parity: Parity, dataBits: byte, st
   if port.isOpen():
     raise newException(InvalidSerialPortStateError, "Serial port is already open.")
 
-  let tempHandle = posix.open(port.name, O_RDWR or O_NOCTTY or O_NONBLOCK)
+  let tempHandle = posix.open(port.name.cstring, O_RDWR or O_NOCTTY or O_NONBLOCK)
   if tempHandle == -1:
     raiseOSError(osLastError())
 
@@ -655,14 +752,14 @@ proc open*(port: AsyncSerialPort, baudRate: int32, parity: Parity, dataBits: byt
   if port.isOpen():
     raise newException(InvalidSerialPortStateError, "Serial port is already open.")
 
-  let tempHandle = posix.open(port.name, O_RDWR or O_NOCTTY)
+  let tempHandle = posix.open(port.name.cstring, O_RDWR or O_NOCTTY)
   if tempHandle == -1:
     raiseOSError(osLastError())
 
   initPort(port, tempHandle, baudRate, parity, dataBits, stopBits, handshaking,
       readTimeout, writeTimeout, dtrEnable, rtsEnable)
 
-proc getPosixMs(): int64 = 
+proc getPosixMs(): int64 =
   var currentTime: Timespec
   if (clock_gettime(CLOCK_MONOTONIC, currentTime) != 0):
     raiseOSError(osLastError())
@@ -718,7 +815,7 @@ proc read*(port: SerialPort, buff: pointer, len: int32): int32 =
         totalNumRead += numRead
 
       timeLeft = endTime - getPosixMs()
-          
+
     result = int32(totalNumRead)
   else:
     let numRead = posix.read(port.handle, buff, int(len))
@@ -849,4 +946,3 @@ proc close*(port: SerialPort | AsyncSerialPort) =
       discard posix.close(cint(port.handle))
       port.handle = when port is AsyncSerialPort: AsyncFD(
           InvalidFileHandle) else: InvalidFileHandle
-
