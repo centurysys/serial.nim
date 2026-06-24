@@ -9,10 +9,10 @@ import os, posix, posix/termios, asyncdispatch
 var
   CRTSCTS {.importc, header: "<termios.h>".}: cuint
   TIOCM_DTR {.importc, header: "<termios.h>".}: cint
+  TIOCM_DSR {.importc, header: "<termios.h>".}: cint
   TIOCM_RTS {.importc, header: "<termios.h>".}: cint
   TIOCM_CAR {.importc, header: "<termios.h>".}: cint
   TIOCM_CTS {.importc, header: "<termios.h>".}: cint
-  TIOCM_LE {.importc, header: "<termios.h>".}: cint
   TIOCM_RNG {.importc, header: "<termios.h>".}: cint
   TIOCMGET {.importc, header: "<termios.h>".}: cint
   TIOCMBIC {.importc, header: "<termios.h>".}: cint
@@ -137,7 +137,7 @@ proc isDsrHolding*(port: SerialPort | AsyncSerialPort): bool =
   if ioctl(cint(port.handle), TIOCMGET, addr flag) == -1:
     raiseOSError(osLastError())
 
-  result = (flag and TIOCM_LE) == TIOCM_LE
+  result = (flag and TIOCM_DSR) == TIOCM_DSR
 
 proc isRingHolding*(port: SerialPort | AsyncSerialPort): bool =
   ## Check whether the ring signal is currently active.
