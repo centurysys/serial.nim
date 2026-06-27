@@ -1,10 +1,13 @@
 ## Serial port handling for POSIX.
 
 import ./serialport_common
-
 export serialport_common
 
 import os, posix, posix/termios, asyncdispatch
+
+when defined(linux):
+  import ../rs485_linux
+  export rs485_linux
 
 var
   CRTSCTS {.importc, header: "<termios.h>".}: cuint
@@ -14,20 +17,11 @@ var
   TIOCM_CAR {.importc, header: "<termios.h>".}: cint
   TIOCM_CTS {.importc, header: "<termios.h>".}: cint
   TIOCM_RNG {.importc, header: "<termios.h>".}: cint
-  TIOCMGET {.importc, header: "<termios.h>".}: cint
-  TIOCMBIC {.importc, header: "<termios.h>".}: cint
-  TIOCMBIS {.importc, header: "<termios.h>".}: cint
-  TIOCINQ {.importc, header: "<termios.h>".}: cint
-  TIOCOUTQ {.importc, header: "<termios.h>".}: cint
-  TIOCGRS485 {.importc, header: "<sys/ioctl.h>".}: cint
-  TIOCSRS485 {.importc, header: "<sys/ioctl.h>".}: cint
-
-const
-  SER_RS485_ENABLED: cuint = (1 shl 0)
-  SER_RS485_RTS_ON_SEND: cuint = (1 shl 1)
-  SER_RS485_RTS_AFTER_SEND: cuint = (1 shl 2)
-  SER_RS485_RX_DURING_TX: cuint = (1 shl 4)
-  SER_RS485_TERMINATE_BUS: cuint = (1 shl 5)
+  TIOCMGET {.importc, header: "<sys/ioctl.h>".}: culong
+  TIOCMBIC {.importc, header: "<sys/ioctl.h>".}: culong
+  TIOCMBIS {.importc, header: "<sys/ioctl.h>".}: culong
+  TIOCINQ {.importc, header: "<sys/ioctl.h>".}: culong
+  TIOCOUTQ {.importc, header: "<sys/ioctl.h>".}: culong
 
 type
   SerialPortBase[HandleType] = ref object of RootObj
@@ -43,23 +37,7 @@ type
   AsyncSerialPort* = ref object of SerialPortBase[AsyncFD]
     ## A serial port type used to read from and write to serial ports asynchronously.
 
-  Serial485ioc {.importc: "struct serial_rs485", header: "<linux/serial.h>".} = object
-    flags: cuint
-    delay_rts_before_send: cuint
-    delay_rts_after_send: cuint
-  Rs485Flag* {.pure.} = enum
-    Enabled = SER_RS485_ENABLED
-    RtsOnSend = SER_RS485_RTS_ON_SEND
-    RtsAfterSend = SER_RS485_RTS_AFTER_SEND
-    RxDuringTx = SER_RS485_RX_DURING_TX
-    TerminateBus = SER_RS485_TERMINATE_BUS
-  Serial485* = object
-    flags*: seq[Rs485Flag]
-    delay_rts_before_send*: uint
-    delay_rts_after_send*: uint
-
-proc ioctl(handle: cint, command: cint, arg: ptr cint): cint {.importc,
-    header: "<sys/ioctl.h>".}
+proc ioctl(handle: cint, command: culong, arg: pointer): cint {.importc, header: "<sys/ioctl.h>".}
 
 proc existsPort(path: string): bool =
   var res: Stat
@@ -68,86 +46,74 @@ proc existsPort(path: string): bool =
 proc newSerialPort*(portName: string): SerialPort =
   ## Initialise a new serial port, ready to open.
   if not existsPort(portName):
-    raise newException(InvalidSerialPortError, "Serialport path '" & portName & "' does not exist or is not a character device")
-
-  result = SerialPort(
-      name: portName,
-      handle: InvalidFileHandle
-  )
+    raise newException(InvalidSerialPortError,
+      "Serialport path '" & portName & "' does not exist or is not a character device")
+  result = SerialPort(name: portName, handle: InvalidFileHandle)
 
 proc newAsyncSerialPort*(portName: string): AsyncSerialPort =
   ## Initialise a new serial port, ready to open.
   if not existsPort(portName):
-    raise newException(InvalidSerialPortError, "Serialport path '" & portName & "' does not exist or is not a character device")
-
-  result = AsyncSerialPort(
-      name: portName,
-      handle: AsyncFD(InvalidFileHandle)
-  )
+    raise newException(InvalidSerialPortError,
+      "Serialport path '" & portName & "' does not exist or is not a character device")
+  result = AsyncSerialPort(name: portName, handle: AsyncFD(InvalidFileHandle))
 
 proc isOpen*(port: SerialPort | AsyncSerialPort): bool =
   ## Check whether the serial port is currently open.
   result = FileHandle(port.handle) != InvalidFileHandle
 
-proc getTimeouts*(port: SerialPort | AsyncSerialPort): tuple[readTimeout: int32,
-    writeTimeout: int32] =
+proc getTimeouts*(port: SerialPort | AsyncSerialPort): tuple[readTimeout: int32, writeTimeout: int32] =
   ## Get the read and write timeouts for the serial port.
   if not port.isOpen():
-    raise newException(InvalidSerialPortStateError, "Cannot get timeouts whilst the serial port is closed")
-
+    raise newException(InvalidSerialPortStateError,
+      "Cannot get timeouts whilst the serial port is closed")
   result = (readTimeout: port.readTimeout, writeTimeout: port.writeTimeout)
 
-proc setTimeouts*(port: SerialPort | AsyncSerialPort, readTimeout: int32,
-    writeTimeout: int32) =
+proc setTimeouts*(port: SerialPort | AsyncSerialPort, readTimeout: int32, writeTimeout: int32) =
   ## Set the read and write timeouts for the serial port.
   if not port.isOpen():
-    raise newException(InvalidSerialPortStateError, "Cannot set timeouts whilst the serial port is closed")
-
+    raise newException(InvalidSerialPortStateError,
+      "Cannot set timeouts whilst the serial port is closed")
   port.readTimeout = readTimeout
   port.writeTimeout = writeTimeout
 
 proc isCarrierHolding*(port: SerialPort | AsyncSerialPort): bool =
   ## Check whether the carrier signal is currently active.
   if not port.isOpen():
-    raise newException(InvalidSerialPortStateError, "Cannot check the carrier signal whilst the serial port is closed")
-
+    raise newException(InvalidSerialPortStateError,
+      "Cannot check the carrier signal whilst the serial port is closed")
   var flag: cint
   if ioctl(cint(port.handle), TIOCMGET, addr flag) == -1:
     raiseOSError(osLastError())
-
   result = (flag and TIOCM_CAR) == TIOCM_CAR
 
 proc isCtsHolding*(port: SerialPort | AsyncSerialPort): bool =
   ## Check whether the clear to send signal is currently active.
   if not port.isOpen():
-    raise newException(InvalidSerialPortStateError, "Cannot check the clear to send signal whilst the serial port is closed")
-
+    raise newException(InvalidSerialPortStateError,
+      "Cannot check the clear to send signal whilst the serial port is closed")
   var flag: cint
   if ioctl(cint(port.handle), TIOCMGET, addr flag) == -1:
     raiseOSError(osLastError())
-
   result = (flag and TIOCM_CTS) == TIOCM_CTS
 
 proc isDsrHolding*(port: SerialPort | AsyncSerialPort): bool =
   ## Check whether the data set ready signal is currently active.
   if not port.isOpen():
-    raise newException(InvalidSerialPortStateError, "Cannot check the data set ready signal whilst the serial port is closed")
-
+    raise newException(InvalidSerialPortStateError,
+      "Cannot check the data set ready signal whilst the serial port is closed")
   var flag: cint
   if ioctl(cint(port.handle), TIOCMGET, addr flag) == -1:
     raiseOSError(osLastError())
-
   result = (flag and TIOCM_DSR) == TIOCM_DSR
 
 proc isRingHolding*(port: SerialPort | AsyncSerialPort): bool =
   ## Check whether the ring signal is currently active.
   if not port.isOpen():
-    raise newException(InvalidSerialPortStateError, "Cannot check the ring signal whilst the serial port is closed")
-
+    raise newException(InvalidSerialPortStateError,
+      "Cannot check the ring signal whilst the serial port is closed")
   var flag: cint
   if ioctl(cint(port.handle), TIOCMGET, addr flag) == -1:
     raiseOSError(osLastError())
-
   result = (flag and TIOCM_RNG) == TIOCM_RNG
 
 proc setStopBits(settings: var Termios, stopBits: StopBits) =
@@ -160,26 +126,23 @@ proc setStopBits(settings: var Termios, stopBits: StopBits) =
 proc `stopBits=`*(port: SerialPort | AsyncSerialPort, stopBits: StopBits) =
   ## Set the stop bits for the serial port.
   if not port.isOpen():
-    raise newException(InvalidSerialPortStateError, "Cannot set the stop bits whilst the serial port is closed")
-
+    raise newException(InvalidSerialPortStateError,
+      "Cannot set the stop bits whilst the serial port is closed")
   var settings: Termios
   if tcGetAttr(cint(port.handle), addr settings) == -1:
     raiseOSError(osLastError())
-
   setStopBits(settings, stopBits)
-
   if tcSetAttr(cint(port.handle), TCSANOW, addr settings) == -1:
     raiseOSError(osLastError())
 
 proc stopBits*(port: SerialPort | AsyncSerialPort): StopBits =
   ## Get the current stop bits for the serial port.
   if not port.isOpen():
-    raise newException(InvalidSerialPortStateError, "Cannot get the stop bits whilst the serial port is closed")
-
+    raise newException(InvalidSerialPortStateError,
+      "Cannot get the stop bits whilst the serial port is closed")
   var settings: Termios
   if tcGetAttr(cint(port.handle), addr settings) == -1:
     raiseOSError(osLastError())
-
   if (settings.c_cflag and CSTOPB) == CSTOPB:
     result = StopBits.Two
   else:
@@ -187,7 +150,6 @@ proc stopBits*(port: SerialPort | AsyncSerialPort): StopBits =
 
 proc setDataBits(settings: var Termios, dataBits: byte) =
   settings.c_cflag = settings.c_cflag and (not CSIZE)
-
   case dataBits
   of 5:
     settings.c_cflag = settings.c_cflag or CS5
@@ -198,32 +160,28 @@ proc setDataBits(settings: var Termios, dataBits: byte) =
   of 8:
     settings.c_cflag = settings.c_cflag or CS8
   else:
-    raise newException(InvalidDataBitsError, "Invalid number of data bits: '" &
-        $dataBits & "'")
+    raise newException(InvalidDataBitsError, "Invalid number of data bits: '" & $dataBits & "'")
 
 proc `dataBits=`*(port: SerialPort | AsyncSerialPort, dataBits: byte) =
   ## Set the number of data bits for the serial port.
   if not port.isOpen():
-    raise newException(InvalidSerialPortStateError, "Cannot set the data bits whilst the serial port is closed")
-
+    raise newException(InvalidSerialPortStateError,
+      "Cannot set the data bits whilst the serial port is closed")
   var settings: Termios
   if tcGetAttr(cint(port.handle), addr settings) == -1:
     raiseOSError(osLastError())
-
   setDataBits(settings, dataBits)
-
   if tcSetAttr(cint(port.handle), TCSANOW, addr settings) == -1:
     raiseOSError(osLastError())
 
 proc dataBits*(port: SerialPort | AsyncSerialPort): byte =
   ## Get the number of data bits for the serial port.
   if not port.isOpen():
-    raise newException(InvalidSerialPortStateError, "Cannot get the data bits whilst the serial port is closed")
-
+    raise newException(InvalidSerialPortStateError,
+      "Cannot get the data bits whilst the serial port is closed")
   var settings: Termios
   if tcGetAttr(cint(port.handle), addr settings) == -1:
     raiseOSError(osLastError())
-
   if (settings.c_cflag and CS8) == CS8:
     result = 8
   elif (settings.c_cflag and CS7) == CS7:
@@ -233,24 +191,23 @@ proc dataBits*(port: SerialPort | AsyncSerialPort): byte =
   else:
     result = 5
 
-# these constants should be in termios.h
-# but some higher values are not present on
-# certain implementations.
+# These constants should be in termios.h, but some higher values are not
+# present on certain implementations.
 when defined(macosx):
-  const B460800 = 460800
-  const B500000 = 500000
-  const B576000 = 576000
-  const B921600 = 921600
-  const B1000000 = 1000000
-  const B1152000 = 1152000
-  const B1500000 = 1500000
-  const B2000000 = 2000000
-  const B2500000 = 2500000
-  const B3000000 = 3000000
-  const B3500000 = 3500000
-  const B4000000 = 4000000
+  const
+    B460800 = 460800
+    B500000 = 500000
+    B576000 = 576000
+    B921600 = 921600
+    B1000000 = 1000000
+    B1152000 = 1152000
+    B1500000 = 1500000
+    B2000000 = 2000000
+    B2500000 = 2500000
+    B3000000 = 3000000
+    B3500000 = 3500000
+    B4000000 = 4000000
 
-# and the missing constants for linux
 when not declared(B57600):
   const B57600 = 0o010001
 when not declared(B115200):
@@ -281,7 +238,6 @@ when not declared(B3500000):
   const B3500000 = 0o010016
 when not declared(B4000000):
   const B4000000 = 0o010017
-
 
 proc setSpeed(settings: ptr Termios, speed: int32) =
   var baud: Speed
@@ -349,40 +305,35 @@ proc setSpeed(settings: ptr Termios, speed: int32) =
   of 4000000:
     baud = B4000000
   else:
-    raise newException(InvalidBaudRateError, "Unsupported baud rate '" &
-        $speed & "'")
+    raise newException(InvalidBaudRateError, "Unsupported baud rate '" & $speed & "'")
 
   if cfSetIspeed(settings, baud) == -1:
     raiseOSError(osLastError())
-
   if cfSetOspeed(settings, baud) == -1:
     raiseOSError(osLastError())
 
 proc `baudRate=`*(port: SerialPort | AsyncSerialPort, baudRate: int32) =
   ## Set the baud rate for the serial port.
   if not port.isOpen():
-    raise newException(InvalidSerialPortStateError, "Cannot set the baud rate whilst the serial port is closed")
-
+    raise newException(InvalidSerialPortStateError,
+      "Cannot set the baud rate whilst the serial port is closed")
   var settings: Termios
   if tcGetAttr(cint(port.handle), addr settings) == -1:
     raiseOSError(osLastError())
-
   setSpeed(addr settings, baudRate)
-
   if tcSetAttr(cint(port.handle), TCSANOW, addr settings) == -1:
     raiseOSError(osLastError())
 
 proc baudRate*(port: SerialPort | AsyncSerialPort): int32 =
   ## Get the current baud rate for the serial port.
   if not port.isOpen():
-    raise newException(InvalidSerialPortStateError, "Cannot get the baud rate whilst the serial port is closed")
-
+    raise newException(InvalidSerialPortStateError,
+      "Cannot get the baud rate whilst the serial port is closed")
   var settings: Termios
   if tcGetAttr(cint(port.handle), addr settings) == -1:
     raiseOSError(osLastError())
 
   let speed: Speed = cfGetOspeed(addr settings)
-
   if speed == B0:
     result = 0
   elif speed == B50:
@@ -451,44 +402,39 @@ proc baudRate*(port: SerialPort | AsyncSerialPort): int32 =
 proc setParity(settings: var Termios, parity: Parity) =
   case parity
   of Parity.None, Parity.Mark, Parity.Space:
-    # Mark and Space aren't officially supported in POSIX, but can be emulated with some tricks - we leave these tricks up to the consumer though
+    # Mark and Space aren't officially supported in POSIX. Consumers can emulate
+    # them if needed; this library keeps POSIX parity disabled for them.
     settings.c_cflag = settings.c_cflag and (not PARENB)
-
     settings.c_iflag = settings.c_iflag and (not (INPCK or ISTRIP))
   of Parity.Odd:
     settings.c_cflag = settings.c_cflag or PARENB
     settings.c_cflag = settings.c_cflag or PARODD
-
     settings.c_iflag = settings.c_iflag or (INPCK or ISTRIP)
   of Parity.Even:
     settings.c_cflag = settings.c_cflag or PARENB
     settings.c_cflag = settings.c_cflag and (not PARODD)
-
     settings.c_iflag = settings.c_iflag or (INPCK or ISTRIP)
 
 proc `parity=`*(port: SerialPort | AsyncSerialPort, parity: Parity) =
   ## Set the parity for the serial port.
   if not port.isOpen():
-    raise newException(InvalidSerialPortStateError, "Cannot set the parity whilst the serial port is closed")
-
+    raise newException(InvalidSerialPortStateError,
+      "Cannot set the parity whilst the serial port is closed")
   var settings: Termios
   if tcGetAttr(cint(port.handle), addr settings) == -1:
     raiseOSError(osLastError())
-
   setParity(settings, parity)
-
   if tcSetAttr(cint(port.handle), TCSANOW, addr settings) == -1:
     raiseOSError(osLastError())
 
 proc parity*(port: SerialPort | AsyncSerialPort): Parity =
   ## Get the parity for the serial port.
   if not port.isOpen():
-    raise newException(InvalidSerialPortStateError, "Cannot get the parity whilst the serial port is closed")
-
+    raise newException(InvalidSerialPortStateError,
+      "Cannot get the parity whilst the serial port is closed")
   var settings: Termios
   if tcGetAttr(cint(port.handle), addr settings) == -1:
     raiseOSError(osLastError())
-
   if (settings.c_cflag and PARENB) == 0:
     result = Parity.None
   elif (settings.c_cflag and PARODD) == PARODD:
@@ -500,7 +446,6 @@ proc `breakStatus=`*(port: SerialPort | AsyncSerialPort, shouldBreak: bool) =
   ## Set the break state on the serial port.
   if not port.isOpen():
     raise newException(InvalidSerialPortStateError, "Cannot break whilst the serial port is closed")
-
   if shouldBreak:
     if tcsendbreak(cint(port.handle), 0) == -1:
       raiseOSError(osLastError())
@@ -508,17 +453,16 @@ proc `breakStatus=`*(port: SerialPort | AsyncSerialPort, shouldBreak: bool) =
 proc breakStatus*(port: SerialPort | AsyncSerialPort): bool =
   ## Get whether the serial port is currently in a break state.
   ##
-  ## This isn't currently implemented in the posix version.
+  ## This isn't currently implemented in the POSIX version.
   if not port.isOpen():
     raise newException(InvalidSerialPortStateError, "Cannot get break whilst the serial port is closed")
-
   result = false
 
 proc `dtrEnable=`*(port: SerialPort | AsyncSerialPort, dtrEnabled: bool) =
   ## Set or clear the data terminal ready signal.
   if not port.isOpen():
-    raise newException(InvalidSerialPortStateError, "Cannot change the data terminal ready signal status whilst the serial port is closed")
-
+    raise newException(InvalidSerialPortStateError,
+      "Cannot change the data terminal ready signal status whilst the serial port is closed")
   var flag = TIOCM_DTR
   if dtrEnabled:
     if ioctl(cint(port.handle), TIOCMBIS, addr flag) == -1:
@@ -530,22 +474,21 @@ proc `dtrEnable=`*(port: SerialPort | AsyncSerialPort, dtrEnabled: bool) =
 proc dtrEnable*(port: SerialPort | AsyncSerialPort): bool =
   ## Check whether the data terminal ready signal is currently set.
   if not port.isOpen():
-    raise newException(InvalidSerialPortStateError, "Cannot get the data terminal ready signal status whilst the serial port is closed")
-
+    raise newException(InvalidSerialPortStateError,
+      "Cannot get the data terminal ready signal status whilst the serial port is closed")
   var flag: cint
   if ioctl(cint(port.handle), TIOCMGET, addr flag) == -1:
     raiseOSError(osLastError())
-
   result = (flag and TIOCM_DTR) == TIOCM_DTR
 
 proc `rtsEnable=`*(port: SerialPort | AsyncSerialPort, rtsEnabled: bool) =
   ## Set or clear the ready to send signal.
   if not port.isOpen():
-    raise newException(InvalidSerialPortStateError, "Cannot change the ready to send signal status whilst the serial port is closed")
-
-  if port.handshake in {Handshake.RequestToSend,
-      Handshake.RequestToSendXOnXOff}:
-    raise newException(InvalidSerialPortStateError, "Cannot set or clear RTS when using RTS or RTS XON/XOFF handshaking")
+    raise newException(InvalidSerialPortStateError,
+      "Cannot change the ready to send signal status whilst the serial port is closed")
+  if port.handshake in {Handshake.RequestToSend, Handshake.RequestToSendXOnXOff}:
+    raise newException(InvalidSerialPortStateError,
+      "Cannot set or clear RTS when using RTS or RTS XON/XOFF handshaking")
 
   var flag = TIOCM_RTS
   if rtsEnabled:
@@ -558,12 +501,11 @@ proc `rtsEnable=`*(port: SerialPort | AsyncSerialPort, rtsEnabled: bool) =
 proc rtsEnable*(port: SerialPort | AsyncSerialPort): bool =
   ## Check whether the ready to send signal is currently set.
   if not port.isOpen():
-    raise newException(InvalidSerialPortStateError, "Cannot get the ready to send signal status whilst the serial port is closed")
-
+    raise newException(InvalidSerialPortStateError,
+      "Cannot get the ready to send signal status whilst the serial port is closed")
   var flag: cint
   if ioctl(cint(port.handle), TIOCMGET, addr flag) == -1:
     raiseOSError(osLastError())
-
   result = (flag and TIOCM_RTS) == TIOCM_RTS
 
 proc setHandshaking(settings: var Termios, handshake: Handshake) =
@@ -572,9 +514,11 @@ proc setHandshaking(settings: var Termios, handshake: Handshake) =
     settings.c_cflag = settings.c_cflag and (not CRTSCTS)
     settings.c_iflag = settings.c_iflag and (not (IXON or IXOFF or IXANY))
   of Handshake.XOnXOff:
+    settings.c_cflag = settings.c_cflag and (not CRTSCTS)
     settings.c_iflag = settings.c_iflag or (IXON or IXOFF or IXANY)
   of Handshake.RequestToSend:
     settings.c_cflag = settings.c_cflag or CRTSCTS
+    settings.c_iflag = settings.c_iflag and (not (IXON or IXOFF or IXANY))
   of Handshake.RequestToSendXOnXOff:
     settings.c_cflag = settings.c_cflag or CRTSCTS
     settings.c_iflag = settings.c_iflag or (IXON or IXOFF or IXANY)
@@ -582,105 +526,81 @@ proc setHandshaking(settings: var Termios, handshake: Handshake) =
 proc `handshake=`*(port: SerialPort | AsyncSerialPort, handshake: Handshake) =
   ## Set the handshaking type for the serial port.
   if not port.isOpen():
-    raise newException(InvalidSerialPortStateError, "Cannot set the handshaking method whilst the serial port is closed")
-
+    raise newException(InvalidSerialPortStateError,
+      "Cannot set the handshaking method whilst the serial port is closed")
   var settings: Termios
   if tcGetAttr(cint(port.handle), addr settings) == -1:
     raiseOSError(osLastError())
-
   setHandshaking(settings, handshake)
-
   if tcSetAttr(cint(port.handle), TCSANOW, addr settings) == -1:
     raiseOSError(osLastError())
+  port.handshake = handshake
 
-proc handshake*(port: SerialPort): Handshake =
+proc handshake*(port: SerialPort | AsyncSerialPort): Handshake =
   ## Get the handshaking type for the serial port.
   if not port.isOpen():
-    raise newException(InvalidSerialPortStateError, "Cannot get the handshaking method whilst the serial port is closed")
-
+    raise newException(InvalidSerialPortStateError,
+      "Cannot get the handshaking method whilst the serial port is closed")
   result = port.handshake
 
 proc inQueueLen*(port: SerialPort | AsyncSerialPort): int =
   ## Get input queue length.
   if not port.isOpen():
     raise newException(InvalidSerialPortStateError,
-        "Cannot get the queue length whilst the serial port is closed")
-
+      "Cannot get the queue length whilst the serial port is closed")
   var length: cint
   if ioctl(cint(port.handle), TIOCINQ, addr length) == -1:
     raiseOSError(osLastError())
-
   result = length
 
 proc outQueueLen*(port: SerialPort | AsyncSerialPort): int =
   ## Get output queue length.
   if not port.isOpen():
     raise newException(InvalidSerialPortStateError,
-        "Cannot get the queue length whilst the serial port is closed")
-
+      "Cannot get the queue length whilst the serial port is closed")
   var length: cint
   if ioctl(cint(port.handle), TIOCOUTQ, addr length) == -1:
     raiseOSError(osLastError())
-
   result = length
 
-proc getSerial485ioc(port: SerialPort | AsyncSerialPort): Serial485ioc =
-  if not port.isOpen():
-    raise newException(InvalidSerialPortStateError, "Cannot change the ready to send signal status whilst the serial port is closed")
-  if ioctl(cint(port.handle), TIOCGRS485, cast[ptr cint](addr result)) == -1:
-    raiseOSError(osLastError())
+when defined(linux):
+  proc getSerial485*(port: SerialPort | AsyncSerialPort): Serial485 =
+    ## Get RS-485 configuration using the already-open port fd.
+    if not port.isOpen():
+      raise newException(InvalidSerialPortStateError,
+        "Cannot get RS485 status whilst the serial port is closed")
+    result = getRs485ByFd(cint(port.handle))
 
-proc getSerial485*(port: SerialPort | AsyncSerialPort): Serial485 =
-  let rs485ioc = port.getSerial485ioc()
-  let flags = rs485ioc.flags
-  if (flags and SER_RS485_ENABLED) != 0:
-    result.flags.add(Rs485Flag.Enabled)
-  if (flags and SER_RS485_RTS_ON_SEND) != 0:
-    result.flags.add(Rs485Flag.RtsOnSend)
-  if (flags and SER_RS485_RTS_AFTER_SEND) != 0:
-    result.flags.add(Rs485Flag.RtsAfterSend)
-  if (flags and SER_RS485_RX_DURING_TX) != 0:
-    result.flags.add(Rs485Flag.RxDuringTx)
-  if (flags and SER_RS485_TERMINATE_BUS) != 0:
-    result.flags.add(Rs485Flag.TerminateBus)
-  result.delay_rts_before_send = rs485ioc.delay_rts_before_send.uint
-  result.delay_rts_after_send = rs485ioc.delay_rts_after_send.uint
+  proc rs485Enabled*(port: SerialPort | AsyncSerialPort): bool =
+    result = port.getSerial485().hasFlag(Rs485Flag.Enabled)
 
-proc rs485Enabled*(port: SerialPort | AsyncSerialPort): bool =
-  let serial485 = port.getSerial485ioc()
-  result = ((serial485.flags and SER_RS485_ENABLED) != 0).bool
+  proc `rs485Enable=`*(port: SerialPort | AsyncSerialPort, enabled: bool) =
+    ## Change only the RS-485 enabled flag while preserving raw driver state.
+    if not port.isOpen():
+      raise newException(InvalidSerialPortStateError,
+        "Cannot change RS485 status whilst the serial port is closed")
+    discard setRs485EnabledByFd(cint(port.handle), enabled)
 
-proc `rs485Enable=`*(port: SerialPort | AsyncSerialPort, rs485Enabled: bool) =
-  var serial485 = port.getSerial485ioc()
-  serial485.flags = serial485.flags and (not SER_RS485_ENABLED.cuint)
-  if rs485Enabled:
-    serial485.flags = serial485.flags or SER_RS485_ENABLED.cuint
-  if ioctl(cint(port.handle), TIOCSRS485, cast[ptr cint](addr serial485)) == -1:
-    raiseOSError(osLastError())
+  proc rxDuringTx*(port: SerialPort | AsyncSerialPort): bool =
+    result = port.getSerial485().hasFlag(Rs485Flag.RxDuringTx)
 
-proc rxDuringTx*(port: SerialPort | AsyncSerialPort): bool =
-  let serial485 = port.getSerial485ioc()
-  let flags = serial485.flags
-  result = ((flags and SER_RS485_RX_DURING_TX) != 0).bool
+  proc `rxDuringTx=`*(port: SerialPort | AsyncSerialPort, enabled: bool) =
+    ## Change only the RX-during-TX flag while preserving raw driver state.
+    if not port.isOpen():
+      raise newException(InvalidSerialPortStateError,
+        "Cannot change RS485 RX-during-TX status whilst the serial port is closed")
+    discard setRxDuringTxByFd(cint(port.handle), enabled)
 
-proc `rxDuringTx=`*(port: SerialPort | AsyncSerialPort, rx_during_tx: bool) =
-  var serial485 = port.getSerial485ioc()
-  serial485.flags = serial485.flags and (not SER_RS485_RX_DURING_TX.cuint)
-  if rx_during_tx:
-    serial485.flags = serial485.flags or SER_RS485_RX_DURING_TX.cuint
-  if ioctl(cint(port.handle), TIOCSRS485, cast[ptr cint](addr serial485)) == -1:
-    raiseOSError(osLastError())
-
-proc initPort(port: SerialPort | AsyncSerialPort, tempHandle: cint, baudRate: int32, parity: Parity, dataBits: byte, stopBits: StopBits,
+proc initPort(port: SerialPort | AsyncSerialPort, tempHandle: cint, baudRate: int32,
+              parity: Parity, dataBits: byte, stopBits: StopBits,
               handshaking: Handshake = Handshake.None,
-                  readTimeout = TIMEOUT_INFINITE,
-              writeTimeout = TIMEOUT_INFINITE, dtrEnable = false,
-                  rtsEnable = false) {.inline.} =
+              readTimeout = TIMEOUT_INFINITE, writeTimeout = TIMEOUT_INFINITE,
+              dtrEnable = false, rtsEnable = false) {.inline.} =
   when port is AsyncSerialPort:
     var registered = false
 
   try:
-    # Check the opened port is a serial port
+    # Check the opened port is a serial port.
     if isatty(tempHandle) != 1:
       raiseOSError(osLastError())
 
@@ -689,7 +609,6 @@ proc initPort(port: SerialPort | AsyncSerialPort, tempHandle: cint, baudRate: in
       raiseOSError(osLastError())
 
     setSpeed(addr settings, baudRate)
-
     settings.c_cflag = settings.c_cflag or (CLOCAL or CREAD)
     settings.c_lflag = settings.c_lflag and (not (ICANON or ECHO or ECHOE or ISIG))
     settings.c_oflag = settings.c_oflag and (not OPOST)
@@ -700,6 +619,7 @@ proc initPort(port: SerialPort | AsyncSerialPort, tempHandle: cint, baudRate: in
     setStopBits(settings, stopBits)
     setHandshaking(settings, handshaking)
 
+    port.handshake = handshaking
     port.readTimeout = readTimeout
     port.writeTimeout = writeTimeout
 
@@ -712,62 +632,55 @@ proc initPort(port: SerialPort | AsyncSerialPort, tempHandle: cint, baudRate: in
       registered = true
     else:
       port.handle = FileHandle(tempHandle)
+
   except:
     when port is AsyncSerialPort:
       if registered:
         unregister(port.handle)
-
     discard posix.close(tempHandle)
-    port.handle = when port is AsyncSerialPort: AsyncFD(
-        InvalidFileHandle) else: InvalidFileHandle
-
+    port.handle = when port is AsyncSerialPort: AsyncFD(InvalidFileHandle) else: InvalidFileHandle
     raise
 
-proc open*(port: SerialPort, baudRate: int32, parity: Parity, dataBits: byte, stopBits: StopBits,
-           handshaking: Handshake = Handshake.None,
-               readTimeout = TIMEOUT_INFINITE,
-           writeTimeout = TIMEOUT_INFINITE, dtrEnable = false,
-               rtsEnable = false) =
+proc open*(port: SerialPort, baudRate: int32, parity: Parity, dataBits: byte,
+           stopBits: StopBits, handshaking: Handshake = Handshake.None,
+           readTimeout = TIMEOUT_INFINITE, writeTimeout = TIMEOUT_INFINITE,
+           dtrEnable = false, rtsEnable = false) =
   ## Open the serial port for reading and writing.
   ##
   ## The `readTimeout` and `writeTimeout` are in milliseconds.
   if port.isOpen():
     raise newException(InvalidSerialPortStateError, "Serial port is already open.")
-
   let tempHandle = posix.open(port.name.cstring, O_RDWR or O_NOCTTY or O_NONBLOCK)
   if tempHandle == -1:
     raiseOSError(osLastError())
-
   initPort(port, tempHandle, baudRate, parity, dataBits, stopBits, handshaking,
-      readTimeout, writeTimeout, dtrEnable, rtsEnable)
+    readTimeout, writeTimeout, dtrEnable, rtsEnable)
 
-proc open*(port: AsyncSerialPort, baudRate: int32, parity: Parity, dataBits: byte, stopBits: StopBits,
-           handshaking: Handshake = Handshake.None,
-               readTimeout = TIMEOUT_INFINITE,
-           writeTimeout = TIMEOUT_INFINITE, dtrEnable = false,
-               rtsEnable = false) =
+proc open*(port: AsyncSerialPort, baudRate: int32, parity: Parity, dataBits: byte,
+           stopBits: StopBits, handshaking: Handshake = Handshake.None,
+           readTimeout = TIMEOUT_INFINITE, writeTimeout = TIMEOUT_INFINITE,
+           dtrEnable = false, rtsEnable = false) =
   ## Open the serial port for reading and writing.
   ##
   ## The `readTimeout` and `writeTimeout` are in milliseconds.
   if port.isOpen():
     raise newException(InvalidSerialPortStateError, "Serial port is already open.")
-
   let tempHandle = posix.open(port.name.cstring, O_RDWR or O_NOCTTY)
   if tempHandle == -1:
     raiseOSError(osLastError())
-
   initPort(port, tempHandle, baudRate, parity, dataBits, stopBits, handshaking,
-      readTimeout, writeTimeout, dtrEnable, rtsEnable)
+    readTimeout, writeTimeout, dtrEnable, rtsEnable)
 
 proc getPosixMs(): int64 =
   var currentTime: Timespec
-  if (clock_gettime(CLOCK_MONOTONIC, currentTime) != 0):
+  if clock_gettime(CLOCK_MONOTONIC, currentTime) != 0:
     raiseOSError(osLastError())
   result = int64(currentTime.tv_sec) * 1000
   result += int64(currentTime.tv_nsec) div 1000000'i64
 
 proc read*(port: SerialPort, buff: pointer, len: int32): int32 =
-  ## Read up to `len` bytes from the serial port into the buffer `buff`. This will return the actual number of bytes that were received.
+  ## Read up to `len` bytes from the serial port into the buffer `buff`.
+  ## This will return the actual number of bytes that were received.
   if not port.isOpen():
     raise newException(InvalidSerialPortStateError, "Port must be open in order to read from it")
 
@@ -781,10 +694,9 @@ proc read*(port: SerialPort, buff: pointer, len: int32): int32 =
 
     timeLeft = port.readTimeout
     endTime = getPosixMs() + timeLeft
-
     var totalNumRead = 0
 
-    while (totalNumRead < len and (port.readTimeout < 0 or timeLeft > 0)):
+    while totalNumRead < len and (port.readTimeout < 0 or timeLeft > 0):
       FD_ZERO(selectSet)
       FD_SET(port.handle, selectSet)
 
@@ -796,67 +708,61 @@ proc read*(port: SerialPort, buff: pointer, len: int32): int32 =
         ptrTimer = addr timer
 
       let selected = select(cint(port.handle + 1), addr selectSet, nil, nil, ptrTimer)
-
       case selected
       of -1:
         raiseOSError(osLastError())
       of 0:
-        if (totalNumRead == 0):
-          raise newException(TimeoutError, "Read timed out after " &
-              $port.readTimeout & " milliseconds")
+        if totalNumRead == 0:
+          raise newException(TimeoutError,
+            "Read timed out after " & $port.readTimeout & " milliseconds")
         else:
           break
       else:
-        var numRead = posix.read(port.handle, cast[pointer](cast[int](buff)+totalNumRead), int(len-totalNumRead))
-
+        let numRead = posix.read(cint(port.handle),
+          cast[pointer](cast[int](buff) + totalNumRead), int(len - totalNumRead))
         if numRead == -1:
           raiseOSError(osLastError())
-
         totalNumRead += numRead
-
-      timeLeft = endTime - getPosixMs()
+        timeLeft = endTime - getPosixMs()
 
     result = int32(totalNumRead)
   else:
-    let numRead = posix.read(port.handle, buff, int(len))
+    let numRead = posix.read(cint(port.handle), buff, int(len))
     if numRead == -1:
-      # port FD is set to O_NONBLOCK so EWOULDBLOCK error is set when 
-      # no data is available, which is treated as a timeout condition.
-      # This means that posix behaves the same as windows. 
+      # The port fd is O_NONBLOCK, so EWOULDBLOCK means a zero-timeout read timed out.
       if cint(osLastError()) == EWOULDBLOCK:
         raise newException(TimeoutError, "Read timed out after 0 milliseconds")
       else:
         raiseOSError(osLastError())
-
     result = int32(numRead)
 
 proc read*(port: AsyncSerialPort, buff: pointer, len: int32): Future[int32] =
-  ## Read up to `len` bytes from the serial port into the buffer `buff`. This will return the actual number of bytes that were received.
+  ## Read up to `len` bytes from the serial port into the buffer `buff`.
+  ## This will return the actual number of bytes that were received.
   var retFuture = newFuture[int32]("serialport.read")
-
   if not port.isOpen():
     retFuture.fail(newException(InvalidSerialPortStateError,
-        "Port must be open in order to write to it"))
+      "Port must be open in order to read from it"))
     return retFuture
 
   proc cb(fd: AsyncFD): bool =
     result = true
-    let res = posix.read(cint(fd), cast[cstring](buff), cint(len))
+    let res = posix.read(cint(fd), buff, int(len))
     if res < 0:
       let lastError = osLastError()
       if int32(lastError) != EAGAIN:
         retFuture.fail(newException(OSError, osErrorMsg(lastError)))
       else:
-        result = false # We still want this callback to be called.
+        result = false
     else:
       retFuture.complete(int32(res))
 
   addRead(port.handle, cb)
-
-  return retFuture
+  result = retFuture
 
 proc write*(port: SerialPort, buff: pointer, len: int32): int32 =
-  ## Write up to `len` bytes to the serial port from the buffer `buff`. This will return the number of bytes that were written.
+  ## Write up to `len` bytes to the serial port from the buffer `buff`.
+  ## This will return the number of bytes that were written.
   if not port.isOpen():
     raise newException(InvalidSerialPortStateError, "Port must be open in order to write to it")
 
@@ -877,68 +783,60 @@ proc write*(port: SerialPort, buff: pointer, len: int32): int32 =
       ptrTimer = addr timer
 
     let selected = select(cint(port.handle + 1), nil, addr selectSet, nil, ptrTimer)
-
     case selected
     of -1:
       raiseOSError(osLastError())
     of 0:
-      raise newException(TimeoutError, "Write timed out after " &
-          $port.writeTimeout & " seconds")
+      raise newException(TimeoutError,
+        "Write timed out after " & $port.writeTimeout & " milliseconds")
     else:
-      let numWritten = posix.write(port.handle, buff, int(len))
-
+      let numWritten = posix.write(cint(port.handle), buff, int(len))
       if numWritten == -1:
         raiseOSError(osLastError())
-
       result = int32(numWritten)
   else:
-    let numWritten = posix.write(port.handle, buff, int(len))
+    let numWritten = posix.write(cint(port.handle), buff, int(len))
     if numWritten == -1:
       raiseOSError(osLastError())
-
     result = int32(numWritten)
 
 proc write*(port: AsyncSerialPort, buff: pointer, len: int32): Future[int32] =
-  ## Write up to `len` bytes to the serial port from the buffer `buff`. This will return the number of bytes that were written.
+  ## Write up to `len` bytes to the serial port from the buffer `buff`.
+  ## This will return the number of bytes that were written.
   ##
-  ## Note that this doesn't currently respect timeout settings on posix.
+  ## Note that this doesn't currently respect timeout settings on POSIX.
   var retFuture = newFuture[int32]("serialport.write")
-
   if not port.isOpen():
     retFuture.fail(newException(InvalidSerialPortStateError,
-        "Port must be open in order to write to it"))
+      "Port must be open in order to write to it"))
     return retFuture
 
   proc cb(fd: AsyncFD): bool =
     result = true
-    var cbuf = cast[cstring](buff)
-    let res = posix.write(cint(fd), addr cbuf[0], cint(len))
+    let res = posix.write(cint(fd), buff, int(len))
     if res < 0:
       let lastError = osLastError()
       if int32(lastError) != EAGAIN:
         retFuture.fail(newException(OSError, osErrorMsg(lastError)))
       else:
-        result = false # We still want this callback to be called.
+        result = false
     else:
       retFuture.complete(int32(res))
 
   addWrite(port.handle, cb)
-
-  return retFuture
+  result = retFuture
 
 proc flush*(port: SerialPort | AsyncSerialPort) =
   ## Flush the buffers for the serial port.
   if not port.isOpen():
     raise newException(InvalidSerialPortStateError, "Port must be open in order to be flushed")
-
   if tcflush(cint(port.handle), TCIOFLUSH) == -1:
     raiseOSError(osLastError())
 
 proc drainOutput*(port: SerialPort | AsyncSerialPort) =
-  ## Flush the buffers for the serial port.
+  ## Drain the output buffer for the serial port.
   if not port.isOpen():
     raise newException(InvalidSerialPortStateError, "Port must be open in order to be drained")
-
   if tcDrain(cint(port.handle)) == -1:
     raiseOSError(osLastError())
 
@@ -950,7 +848,5 @@ proc close*(port: SerialPort | AsyncSerialPort) =
     finally:
       when port is AsyncSerialPort:
         unregister(port.handle)
-
       discard posix.close(cint(port.handle))
-      port.handle = when port is AsyncSerialPort: AsyncFD(
-          InvalidFileHandle) else: InvalidFileHandle
+      port.handle = when port is AsyncSerialPort: AsyncFD(InvalidFileHandle) else: InvalidFileHandle
